@@ -1630,7 +1630,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     networks = []
     network_flows = sorted(network_flows + syscall_flows,
                            key=lambda x: x.get("type"),
-                           reverse=True)
+                           reverse=True) # sort base on flow type(session/res/req)
     for flow in network_flows:
         if not flow["req_tcp_seq"] and not flow["resp_tcp_seq"]:
             continue
@@ -2318,14 +2318,24 @@ def get_parent_trace(parent_trace, traces):
         return parent_trace
 
 
-def sort_by_x_request_id(traces):
-    for trace_0 in traces:
-        if trace_0.get('parent_id', -1) < 0:
+def sort_by_x_request_id(network_flows):
+    """
+    when runs on here, for net-span what's already done: 
+    1. net-span found sys-span/app-span as parent;
+    2. net-span found its `service`;
+    3. net-span sorted and group by tcp_seq;
+    what's still unknown: 
+    1. when if net-span cross Gateway, [pod1]-[LB]-[ingress]-[pod2] still in seperated `service`;
+    2. need to find parent of FIRST span in [LB](s-nd/s) and ingress(s-nd/s) and pod-2(s-nd/s)
+       it may be a (c-nd/c) in last `service`
+    """
+    for child_flow in network_flows:
+        if child_flow.get('parent_id', -1) < 0:
             parent_traces = []
-            for trace_1 in traces:
-                if trace_0.get('_uid') == trace_1.get('_uid'):
+            for parent_flow in network_flows:
+                if child_flow.get('_uid') == parent_flow.get('_uid'):
                     continue
-                if not trace_1.get('x_request_id_1') or not trace_0.get(
+                if not parent_flow.get('x_request_id_1') or not child_flow.get(
                         'x_request_id_0'):
                     continue
                 # 这里确定父子关系
@@ -2336,12 +2346,22 @@ def sort_by_x_request_id(traces):
                 # 对后端：s 位置的 flow 有 x_request_id_y_0
                 # 综上，当 x_request_id_0 == x_request_id_1 时，x_request_id_1 一定是父节点
                 # 注意需要考虑网关无法部署 agent 的场景
-                if trace_1.get('x_request_id_1') == trace_0.get(
+                if parent_flow.get('x_request_id_1') == child_flow.get(
                         'x_request_id_0'):
-                    parent_traces.append(trace_1)
+                    if parent_flow.get('x_request_id_1') == child_flow.get('x_request_id_1') or \
+                        parent_flow.get('x_request_id_0') == child_flow.get('x_request_id_0'):
+                        # 1. 网关1部署了 agent，透传了 x-req-id:(正常情况下通过 tcp_seq 已关联上 parent，这里是考虑已部署+缺 span 的异常情况)
+                        # parent.x-req-id-1==child.x-req-id-1: child_flow - parent_flow 是网关1[c/s]-前端[c]
+                        # parent.x-req-id-0==child.x-req-id-0: child_flow - parent_flow 是网关2[s]-网关1[c/s] / 后端[s]-网关2[c/s]
+                        # 2. 网关1没部署 agent，透传了 x-req-id:
+                        # parent.x-req-id-1==child.x-req-id-1: child_flow - parent_flow 是网关2[s]-前端[c]
+                        # parent.x-req-id-0==child.x-req-id-0: child_flow - parent_flow 是后端[s]-网关2[c]
+                        continue
+                    else:
+                        parent_traces.append(parent_flow)
             # 如果span有多个父span，选父span的叶子span作为parent
             if parent_traces:
                 parent_trace = get_parent_trace(parent_traces[0],
                                                 parent_traces)
-                _set_parent(trace_0, parent_trace,
+                _set_parent(child_flow, parent_trace,
                             "trace mounted due to x_request_id")
